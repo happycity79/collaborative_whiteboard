@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>互動共編白板</title>
+    <!-- Tailwind CSS loaded securely via official HTTPS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        .board-grid {
+            background-image: radial-gradient(#cbd5e1 1.5px, transparent 1.5px);
+            background-size: 28px 28px;
+            background-color: #f8fafc;
+        }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="h-full bg-slate-50 overflow-hidden text-slate-800 flex flex-col">
+
+    <script>
+        if (!window.appState) {
+            window.appState = {
+                view: 'landing',
+                role: null,
+                boardId: '',
+                pin: '1234',
+                boardName: '',
+                userName: '',
+                currentGroupId: 'group-1',
+                groups: [
+                    { id: 'group-1', name: '第 1 組' },
+                    { id: 'group-2', name: '第 2 組' },
+                    { id: 'group-3', name: '第 3 組' },
+                    { id: 'group-4', name: '第 4 組' }
+                ],
+                tool: 'select',
+                penSize: 5,
+                penColor: '#0f172a',
+                eraserSize: 30,
+                textSize: 18,
+                textColor: '#0f172a',
+                isLocked: false
+            };
+        }
+
+        // Global distinct board registry
+        if (!window.activeBoardsRegistry) {
+            window.activeBoardsRegistry = {
+                'b_default': { boardId: 'b_default', pin: '1234', boardName: '預設示範白板' }
+            };
+        }
+
+        // Isolated multi-board & multi-group data store
+        if (!window.boardDataStore) {
+            window.boardDataStore = {
+                'b_default': {
+                    'group-1': { elements: [], strokes: [] },
+                    'group-2': { elements: [], strokes: [] },
+                    'group-3': { elements: [], strokes: [] },
+                    'group-4': { elements: [], strokes: [] }
+                }
+            };
+        }
+
+        window.saveBoardData = function(boardId, groupId) {
+            if (!window.boardDataStore[boardId]) {
+                window.boardDataStore[boardId] = {};
+            }
+            if (!window.boardDataStore[boardId][groupId]) {
+                window.boardDataStore[boardId][groupId] = { elements: [], strokes: [] };
+            }
+            const data = window.boardDataStore[boardId][groupId];
+            const key = `wb_store_${boardId}_${groupId}`;
+            try {
+                localStorage.setItem(key, JSON.stringify(data));
+            } catch(e) {}
+        };
+
+        window.loadBoardData = function(boardId, groupId, callback) {
+            if (!window.boardDataStore[boardId]) {
+                window.boardDataStore[boardId] = {};
+            }
+            const key = `wb_store_${boardId}_${groupId}`;
+            let localData = null;
+            try {
+                const cached = localStorage.getItem(key);
+                if (cached) localData = JSON.parse(cached);
+            } catch(e) {}
+
+            if (!window.boardDataStore[boardId][groupId]) {
+                window.boardDataStore[boardId][groupId] = localData || { elements: [], strokes: [] };
+            } else if (localData && (!window.boardDataStore[boardId][groupId].elements || window.boardDataStore[boardId][groupId].elements.length === 0)) {
+                window.boardDataStore[boardId][groupId] = localData;
+            }
+            if (callback) callback(window.boardDataStore[boardId][groupId]);
+        };
+    </script>
+
+    <div id="app-container" class="flex-1 flex flex-col h-full overflow-hidden">
+        <!-- Dynamic views rendered via JS -->
+    </div>
+
+    <!-- Modal Dialog -->
+    <div id="modal-container" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center hidden">
+        <div class="bg-white rounded-2xl p-6 max-w-sm w-full mx-4 shadow-2xl border border-slate-100">
+            <h3 id="modal-title" class="text-lg font-bold text-slate-800 mb-2">提示</h3>
+            <p id="modal-message" class="text-sm text-slate-600 mb-6 leading-relaxed">訊息內容</p>
+            <div class="flex justify-end gap-3" id="modal-actions">
+                <button onclick="closeModal()" class="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl text-sm transition shadow-sm">確定</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function showModal(title, message, callback) {
+            document.getElementById('modal-title').innerText = title;
+            document.getElementById('modal-message').innerText = message;
+            const actions = document.getElementById('modal-actions');
+            if (callback) {
+                actions.innerHTML = `
+                    <button onclick="closeModal()" class="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium rounded-xl text-sm transition">取消</button>
+                    <button id="modal-confirm-btn" class="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl text-sm transition shadow-sm">確定</button>
+                `;
+                document.getElementById('modal-confirm-btn').onclick = () => { closeModal(); callback(); };
+            } else {
+                actions.innerHTML = `<button onclick="closeModal()" class="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl text-sm transition shadow-sm">確定</button>`;
+            }
+            document.getElementById('modal-container').classList.remove('hidden');
+        }
+
+        function closeModal() {
+            document.getElementById('modal-container').classList.add('hidden');
+        }
+
+        window.showModal = showModal;
+        window.closeModal = closeModal;
+
+        function renderView() {
+            const container = document.getElementById('app-container');
+            if (!container) return;
+            const state = window.appState || { view: 'landing' };
+
+            if (state.view === 'landing') {
+                container.innerHTML = `
+                    <div class="flex-1 flex items-center justify-center bg-gradient-to-br from-indigo-50 via-slate-50 to-blue-50 p-6 overflow-y-auto">
+                        <div class="max-w-md w-full bg-white/95 backdrop-blur-xl rounded-3xl shadow-xl border border-slate-200/80 p-8 text-center">
+                            <div class="w-16 h-16 bg-indigo-600 rounded-2xl mx-auto flex items-center justify-center text-white text-2xl shadow-lg shadow-indigo-200 mb-6">
+                                <svg class="w-8 h-8" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                            </div>
+                            <h1 class="text-2xl font-bold text-slate-900 mb-2">多功能互動共編白板</h1>
+                            <p class="text-sm text-slate-500 mb-8">支援教師獨立白板管理、即時手寫、便利貼與獨立群組互動</p>
+
+                            <div class="space-y-4">
+                                <button onclick="setViewState('teacher-setup')" class="w-full py-3.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-2xl shadow-md hover:shadow-lg transition flex items-center justify-center gap-3 text-sm">
+                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg>
+                                    我是老師 (建立獨立白板)
+                                </button>
+                                <button onclick="setViewState('student-join')" class="w-full py-3.5 px-4 bg-white hover:bg-slate-50 text-slate-700 font-semibold rounded-2xl border border-slate-300 shadow-sm transition flex items-center justify-center gap-3 text-sm">
+                                    <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+                                    我是學生 (輸入代碼與密碼進入)
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'teacher-setup') {
+                container.innerHTML = `
+                    <div class="flex-1 flex items-center justify-center bg-gradient-to-br from-indigo-50 via-slate-50 to-blue-50 p-6 overflow-y-auto">
+                        <div class="max-w-md w-full bg-white/95 backdrop-blur-xl rounded-3xl shadow-xl border border-slate-200/80 p-8 text-left">
+                            <button onclick="setViewState('landing')" class="text-slate-400 hover:text-slate-600 mb-6 flex items-center gap-2 text-xs font-semibold">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>返回首頁
+                            </button>
+                            <h2 class="text-xl font-bold text-slate-900 mb-1">教師白板設定</h2>
+                            <p class="text-xs text-slate-500 mb-6">建立全新的獨立白板代碼與學生進入密碼</p>
+
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-slate-700 mb-1">白板代碼 (請提供給學生)</label>
+                                    <input type="text" id="t-board-id" value="b_${Math.random().toString(36).substring(2, 8)}" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-4 py-2.5 text-sm font-mono font-bold text-indigo-600 outline-none" />
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-slate-700 mb-1">白板名稱</label>
+                                    <input type="text" id="t-board-name" value="自然科學第3章討論" class="w-full bg-white border border-slate-300 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-slate-700 mb-1">學生進入密碼 (PIN)</label>
+                                    <input type="text" id="t-board-pin" value="1234" class="w-full bg-white border border-slate-300 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-slate-700 mb-1">分組數量設定</label>
+                                    <select id="t-groups-count" class="w-full bg-white border border-slate-300 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                                        <option value="3">3 組</option>
+                                        <option value="4" selected>4 組</option>
+                                        <option value="6">6 組</option>
+                                        <option value="8">8 組</option>
+                                    </select>
+                                </div>
+                                <button onclick="createTeacherBoard()" class="w-full mt-4 py-3.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-2xl shadow-md transition text-sm">
+                                    建立並進入獨立白板
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'student-join') {
+                container.innerHTML = `
+                    <div class="flex-1 flex items-center justify-center bg-gradient-to-br from-indigo-50 via-slate-50 to-blue-50 p-6 overflow-y-auto">
+                        <div class="max-w-md w-full bg-white/95 backdrop-blur-xl rounded-3xl shadow-xl border border-slate-200/80 p-8 text-left">
+                            <button onclick="setViewState('landing')" class="text-slate-400 hover:text-slate-600 mb-6 flex items-center gap-2 text-xs font-semibold">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>返回首頁
+                            </button>
+                            <h2 class="text-xl font-bold text-slate-900 mb-1">學生加入白板</h2>
+                            <p class="text-xs text-slate-500 mb-6">請輸入老師提供的白板代碼與正確密碼</p>
+
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-xs font-medium text-slate-700 mb-1">白板代碼</label>
+                                    <input type="text" id="s-board-id" placeholder="例如: b_default" class="w-full bg-white border border-slate-300 rounded-xl px-4 py-2.5 text-sm font-mono outline-none focus:ring-2 focus:ring-indigo-500" />
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-slate-700 mb-1">進入密碼 (PIN)</label>
+                                    <input type="password" id="s-board-pin" placeholder="請輸入老師設定的密碼" class="w-full bg-white border border-slate-300 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+                                </div>
+                                <div>
+                                    <label class="block text-xs font-medium text-slate-700 mb-1">您的姓名</label>
+                                    <input type="text" id="s-user-name" placeholder="例如: 王小明" class="w-full bg-white border border-slate-300 rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+                                </div>
+                                <button onclick="joinStudentBoard()" class="w-full mt-4 py-3.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-2xl shadow-md transition text-sm">
+                                    驗證並進入白板
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else if (state.view === 'board') {
+                renderBoardWorkspace(container);
+            }
+        }
+
+        window.setViewState = function(view) {
+            if (!window.appState) {
+                window.appState = { view: 'landing', groups: [{id: 'group-1', name: '第 1 組'}] };
+            }
+            window.appState.view = view;
+            renderView();
+            if (view === 'board') {
+                setTimeout(() => {
+                    initBoardCanvas();
+                    loadBoardData(window.appState.boardId, window.appState.currentGroupId, () => {
+                        renderElements();
+                        redrawCanvasStrokes();
+                    });
+                }, 50);
+            }
+        };
+
+        window.createTeacherBoard = function() {
+            const bId = document.getElementById('t-board-id').value.trim() || 'b_' + Math.random().toString(36).substring(2, 8);
+            const boardName = document.getElementById('t-board-name').value.trim() || '自然科學第3章討論';
+            const pin = document.getElementById('t-board-pin').value.trim() || '1234';
+            const gCount = parseInt(document.getElementById('t-groups-count').value) || 4;
+
+            window.appState.role = 'teacher';
+            window.appState.boardId = bId;
+            window.appState.pin = pin;
+            window.appState.boardName = boardName;
+            window.appState.groups = [];
+            
+            const groupStore = {};
+            for(let i=1; i<=gCount; i++) {
+                const gId = `group-${i}`;
+                window.appState.groups.push({ id: gId, name: `第 ${i} 組` });
+                groupStore[gId] = { elements: [], strokes: [] };
+            }
+            window.appState.currentGroupId = 'group-1';
+
+            window.activeBoardsRegistry[bId] = {
+                boardId: bId,
+                pin: pin,
+                boardName: boardName
+            };
+
+            if (!window.boardDataStore[bId]) {
+                window.boardDataStore[bId] = groupStore;
+            }
+
+            setViewState('board');
+        };
+
+        window.joinStudentBoard = function() {
+            const bId = document.getElementById('s-board-id').value.trim();
+            const pin = document.getElementById('s-board-pin').value.trim();
+            const name = document.getElementById('s-user-name').value.trim();
+
+            if(!bId || !pin || !name) {
+                showModal('提示', '請填寫完整資訊 (白板代碼、密碼與姓名)');
+                return;
+            }
+
+            const registeredBoard = window.activeBoardsRegistry[bId];
+            if (!registeredBoard) {
+                showModal('登入失敗', '找不到此白板代碼，請確認代碼是否正確或老師是否已建立該白板。');
+                return;
+            }
+
+            if (registeredBoard.pin !== pin) {
+                showModal('登入失敗', '密碼 (PIN) 錯誤，請向老師確認正確密碼。');
+                return;
+            }
+
+            window.appState.role = 'student';
+            window.appState.boardId = bId;
+            window.appState.pin = pin;
+            window.appState.boardName = registeredBoard.boardName || '分組共編白板';
+            window.appState.userName = name;
+            window.appState.groups = [
+                { id: 'group-1', name: '第 1 組' },
+                { id: 'group-2', name: '第 2 組' },
+                { id: 'group-3', name: '第 3 組' },
+                { id: 'group-4', name: '第 4 組' }
+            ];
+            window.appState.currentGroupId = 'group-1';
+
+            if (!window.boardDataStore[bId]) {
+                window.boardDataStore[bId] = {
+                    'group-1': { elements: [], strokes: [] },
+                    'group-2': { elements: [], strokes: [] },
+                    'group-3': { elements: [], strokes: [] },
+                    'group-4': { elements: [], strokes: [] }
+                };
+            }
+
+            setViewState('board');
+        };
+
+        function renderBoardWorkspace(container) {
+            const state = window.appState;
+            container.innerHTML = `
+                <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between shrink-0 z-20 shadow-sm flex-wrap gap-4">
+                    <div class="flex items-center gap-4">
+                        <div class="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center text-white font-bold shadow">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+                        </div>
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <h1 class="text-base font-bold text-slate-800">${state.boardName || '互動白板工作區'}</h1>
+                                <span class="px-2 py-0.5 bg-indigo-50 text-indigo-700 text-xs font-semibold rounded-md border border-indigo-100">${state.role === 'teacher' ? '教師端' : '學生端: ' + state.userName}</span>
+                            </div>
+                            <div class="flex items-center gap-3 mt-0.5">
+                                <p class="text-xs text-slate-500 bg-indigo-50/70 px-2 py-0.5 rounded border border-indigo-100/60 flex items-center gap-1.5">
+                                    <span class="font-semibold text-indigo-900">白板代碼:</span> 
+                                    <span class="font-mono font-bold text-indigo-600 select-all">${state.boardId}</span>
+                                    <button onclick="navigator.clipboard.writeText('${state.boardId}'); showModal('提示', '白板代碼已複製到剪貼簿！');" class="hover:text-indigo-800 text-indigo-500 ml-1" title="複製代碼">📋</button>
+                                </p>
+                                <p class="text-xs text-slate-500">PIN: <span class="font-mono font-medium text-slate-700">${state.pin}</span></p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Group Selector Tabs -->
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <div class="flex items-center gap-1 bg-slate-100 p-1 rounded-xl overflow-x-auto max-w-md">
+                            ${state.groups.map(g => `
+                                <button onclick="switchGroup('${g.id}')" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition whitespace-nowrap ${state.currentGroupId === g.id ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'}">
+                                    👥 ${g.name}
+                                </button>
+                            `).join('')}
+                        </div>
+                        ${state.role === 'teacher' ? `
+                            <button onclick="addNewGroup()" class="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-semibold transition flex items-center gap-1.5" title="新增一組">
+                                ➕ 新增組別
+                            </button>
+                        ` : ''}
+                    </div>
+
+                    <div class="flex items-center gap-3">
+                        ${state.role === 'teacher' ? `
+                            <button onclick="toggleLockBoard()" class="px-3.5 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-2 border ${state.isLocked ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}">
+                                <span>🔒 ${state.isLocked ? '白板已鎖定' : '鎖定白板'}</span>
+                            </button>
+                        ` : ''}
+                        <button onclick="setViewState('landing')" class="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-xs transition flex items-center gap-2">
+                            🚪 離開
+                        </button>
+                    </div>
+                </header>
+
+                <!-- Toolbar & Subtoolbars -->
+                <div class="bg-white border-b border-slate-200 shrink-0 z-10 shadow-sm flex flex-col">
+                    <div class="px-6 py-2.5 flex items-center gap-4 justify-between flex-wrap">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <button onclick="setTool('select')" class="px-3 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-2 ${state.tool === 'select' ? 'bg-indigo-50 text-indigo-600 border border-indigo-200' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'}">
+                                🖱️ 選擇移動
+                            </button>
+                            <button onclick="setTool('pen')" class="px-3 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-2 ${state.tool === 'pen' ? 'bg-indigo-50 text-indigo-600 border border-indigo-200' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'}">
+                                ✏️ 手寫筆
+                            </button>
+                            <button onclick="setTool('eraser')" class="px-3 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-2 ${state.tool === 'eraser' ? 'bg-indigo-50 text-indigo-600 border border-indigo-200' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'}">
+                                🧹 橡皮擦
+                            </button>
+                            <button onclick="setTool('text')" class="px-3 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-2 ${state.tool === 'text' ? 'bg-indigo-50 text-indigo-600 border border-indigo-200' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'}">
+                                🔤 插入文字
+                            </button>
+                            <button onclick="setTool('sticky')" class="px-3 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-2 ${state.tool === 'sticky' ? 'bg-indigo-50 text-indigo-600 border border-indigo-200' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'}">
+                                📝 插入便條紙
+                            </button>
+                            <button onclick="setTool('image')" class="px-3 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-2 ${state.tool === 'image' ? 'bg-indigo-50 text-indigo-600 border border-indigo-200' : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'}">
+                                🖼️ 插入圖片
+                            </button>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <button onclick="clearCurrentBoard()" class="px-3 py-2 bg-red-50 hover:bg-red-100 text-red-600 font-semibold rounded-xl text-xs transition flex items-center gap-2">
+                                🗑️ 清空此組白板
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Pen settings -->
+                    <div id="pen-settings" class="bg-slate-50 border-t border-slate-100 px-6 py-2 flex items-center gap-6 text-xs ${state.tool !== 'pen' ? 'hidden' : ''}">
+                        <div class="flex items-center gap-3">
+                            <span class="font-medium text-slate-600">筆幅粗細：</span>
+                            <button onclick="setPenSize(2)" class="px-3 py-1 rounded-lg ${state.penSize === 2 ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-700'} font-medium transition">細</button>
+                            <button onclick="setPenSize(5)" class="px-3 py-1 rounded-lg ${state.penSize === 5 ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-700'} font-medium transition">中</button>
+                            <button onclick="setPenSize(12)" class="px-3 py-1 rounded-lg ${state.penSize === 12 ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-700'} font-medium transition">粗</button>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="font-medium text-slate-600">顏色：</span>
+                            <div class="flex items-center gap-1.5">
+                                <button onclick="setPenColor('#0f172a')" class="w-6 h-6 rounded-full bg-slate-900 border ${state.penColor === '#0f172a' ? 'ring-2 ring-indigo-500' : ''}"></button>
+                                <button onclick="setPenColor('#ef4444')" class="w-6 h-6 rounded-full bg-red-500 border ${state.penColor === '#ef4444' ? 'ring-2 ring-indigo-500' : ''}"></button>
+                                <button onclick="setPenColor('#3b82f6')" class="w-6 h-6 rounded-full bg-blue-500 border ${state.penColor === '#3b82f6' ? 'ring-2 ring-indigo-500' : ''}"></button>
+                                <button onclick="setPenColor('#10b981')" class="w-6 h-6 rounded-full bg-emerald-500 border ${state.penColor === '#10b981' ? 'ring-2 ring-indigo-500' : ''}"></button>
+                                <button onclick="setPenColor('#f59e0b')" class="w-6 h-6 rounded-full bg-amber-500 border ${state.penColor === '#f59e0b' ? 'ring-2 ring-indigo-500' : ''}"></button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Eraser settings -->
+                    <div id="eraser-settings" class="bg-slate-50 border-t border-slate-100 px-6 py-2 flex items-center gap-6 text-xs ${state.tool !== 'eraser' ? 'hidden' : ''}">
+                        <div class="flex items-center gap-3">
+                            <span class="font-medium text-slate-600">橡皮擦大小：</span>
+                            <button onclick="setEraserSize(15)" class="px-3 py-1 rounded-lg ${state.eraserSize === 15 ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-700'} font-medium transition">小 (15px)</button>
+                            <button onclick="setEraserSize(30)" class="px-3 py-1 rounded-lg ${state.eraserSize === 30 ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-700'} font-medium transition">中 (30px)</button>
+                            <button onclick="setEraserSize(60)" class="px-3 py-1 rounded-lg ${state.eraserSize === 60 ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-700'} font-medium transition">大 (60px)</button>
+                        </div>
+                    </div>
+
+                    <!-- Text settings -->
+                    <div id="text-settings" class="bg-slate-50 border-t border-slate-100 px-6 py-2 flex items-center gap-6 text-xs ${state.tool !== 'text' ? 'hidden' : ''}">
+                        <div class="flex items-center gap-3">
+                            <span class="font-medium text-slate-600">字體大小：</span>
+                            <select id="text-size-select" onchange="setTextSize(this.value)" class="bg-white border border-slate-300 rounded-lg px-3 py-1 outline-none text-xs font-medium">
+                                <option value="14" ${state.textSize === 14 ? 'selected' : ''}>微小 (14px)</option>
+                                <option value="18" ${state.textSize === 18 ? 'selected' : ''}>標準 (18px)</option>
+                                <option value="24" ${state.textSize === 24 ? 'selected' : ''}>中 (24px)</option>
+                                <option value="32" ${state.textSize === 32 ? 'selected' : ''}>大 (32px)</option>
+                                <option value="48" ${state.textSize === 48 ? 'selected' : ''}>特大 (48px)</option>
+                            </select>
+                            <button onclick="addNewText()" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-sm transition">
+                                ➕ 新增文字方塊
+                            </button>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="font-medium text-slate-600">文字顏色：</span>
+                            <div class="flex items-center gap-1.5">
+                                <button onclick="setTextColor('#0f172a')" class="w-6 h-6 rounded-full bg-slate-900 border ${state.textColor === '#0f172a' ? 'ring-2 ring-indigo-500' : ''}"></button>
+                                <button onclick="setTextColor('#ef4444')" class="w-6 h-6 rounded-full bg-red-500 border ${state.textColor === '#ef4444' ? 'ring-2 ring-indigo-500' : ''}"></button>
+                                <button onclick="setTextColor('#3b82f6')" class="w-6 h-6 rounded-full bg-blue-500 border ${state.textColor === '#3b82f6' ? 'ring-2 ring-indigo-500' : ''}"></button>
+                                <button onclick="setTextColor('#10b981')" class="w-6 h-6 rounded-full bg-emerald-500 border ${state.textColor === '#10b981' ? 'ring-2 ring-indigo-500' : ''}"></button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Sticky settings -->
+                    <div id="sticky-settings" class="bg-slate-50 border-t border-slate-100 px-6 py-2 flex items-center gap-6 text-xs ${state.tool !== 'sticky' ? 'hidden' : ''}">
+                        <div class="flex items-center gap-3">
+                            <span class="font-medium text-slate-600">選擇便條紙顏色並新增：</span>
+                            <div class="flex items-center gap-2">
+                                <button onclick="addStickyNote('bg-yellow-200')" class="w-7 h-7 rounded-lg bg-yellow-200 border border-yellow-300 shadow-sm hover:scale-105 transition" title="黃色便條"></button>
+                                <button onclick="addStickyNote('bg-pink-200')" class="w-7 h-7 rounded-lg bg-pink-200 border border-pink-300 shadow-sm hover:scale-105 transition" title="粉色便條"></button>
+                                <button onclick="addStickyNote('bg-blue-200')" class="w-7 h-7 rounded-lg bg-blue-200 border border-blue-300 shadow-sm hover:scale-105 transition" title="藍色便條"></button>
+                                <button onclick="addStickyNote('bg-emerald-200')" class="w-7 h-7 rounded-lg bg-emerald-200 border border-emerald-300 shadow-sm hover:scale-105 transition" title="綠色便條"></button>
+                                <button onclick="addStickyNote('bg-purple-200')" class="w-7 h-7 rounded-lg bg-purple-200 border border-purple-300 shadow-sm hover:scale-105 transition" title="紫色便條"></button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Image settings -->
+                    <div id="image-settings" class="bg-slate-50 border-t border-slate-100 px-6 py-2 flex items-center gap-6 text-xs ${state.tool !== 'image' ? 'hidden' : ''}">
+                        <div class="flex items-center gap-3 flex-wrap">
+                            <span class="font-medium text-slate-600">插入圖片方式：</span>
+                            <div class="flex items-center gap-2">
+                                <input type="text" id="image-url-input" placeholder="貼上圖片網址 (https://...)" class="bg-white border border-slate-300 rounded-lg px-3 py-1.5 outline-none w-56 text-xs" />
+                                <button onclick="addImageByUrl()" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium transition shadow-sm">網址插入</button>
+                            </div>
+                            <span class="text-slate-300">|</span>
+                            <div class="flex items-center gap-2">
+                                <input type="file" id="image-file-input" accept="image/*" onchange="handleImageFileUpload(event)" class="text-xs file:mr-2 file:py-1 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100 cursor-pointer" />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Whiteboard Canvas & Elements Workspace -->
+                <div id="board-viewport" class="flex-1 relative overflow-hidden board-grid bg-slate-50">
+                    <canvas id="drawing-canvas" class="absolute inset-0 z-0 pointer-events-auto"></canvas>
+                    <div id="board-elements-container" class="absolute inset-0 z-10 pointer-events-none"></div>
+                </div>
+            `;
+        }
+
+        let canvas, ctx;
+        let isDrawing = false;
+        let lastX = 0, lastY = 0;
+        let currentStroke = null;
+        let currentMouseX = -100, currentMouseY = -100;
+
+        function initBoardCanvas() {
+            canvas = document.getElementById('drawing-canvas');
+            if (!canvas) return;
+            ctx = canvas.getContext('2d');
+            resizeCanvas();
+
+            window.removeEventListener('resize', resizeCanvas);
+            window.addEventListener('resize', resizeCanvas);
+
+            canvas.removeEventListener('pointerdown', handlePointerDown);
+            canvas.removeEventListener('pointermove', handlePointerMove);
+            canvas.removeEventListener('pointerup', handlePointerUp);
+            canvas.removeEventListener('pointerleave', handlePointerLeave);
+
+            canvas.addEventListener('pointerdown', handlePointerDown);
+            canvas.addEventListener('pointermove', handlePointerMove);
+            canvas.addEventListener('pointerup', handlePointerUp);
+            canvas.addEventListener('pointerleave', handlePointerLeave);
+        }
+
+        function resizeCanvas() {
+            if (!canvas) return;
+            const parent = canvas.parentElement;
+            canvas.width = parent.clientWidth;
+            canvas.height = parent.clientHeight;
+            redrawCanvasStrokes();
+        }
+
+        window.addNewGroup = function() {
+            const groups = window.appState.groups;
+            const nextIdx = groups.length + 1;
+            const newGroupId = `group-${nextIdx}`;
+            groups.push({ id: newGroupId, name: `第 ${nextIdx} 組` });
+            
+            const bId = window.appState.boardId;
+            if (!window.boardDataStore[bId]) window.boardDataStore[bId] = {};
+            if (!window.boardDataStore[bId][newGroupId]) {
+                window.boardDataStore[bId][newGroupId] = { elements: [], strokes: [] };
+            }
+
+            renderView();
+            initBoardCanvas();
+            switchGroup(newGroupId);
+        };
+
+        window.setTool = function(tool) {
+            window.appState.tool = tool;
+            renderView();
+            setTimeout(() => {
+                initBoardCanvas();
+                loadBoardData(window.appState.boardId, window.appState.currentGroupId, () => {
+                    renderElements();
+                    redrawCanvasStrokes();
+                });
+            }, 20);
+        };
+
+        window.setPenSize = function(size) { window.appState.penSize = size; renderView(); initBoardCanvas(); renderElements(); redrawCanvasStrokes(); };
+        window.setPenColor = function(color) { window.appState.penColor = color; renderView(); initBoardCanvas(); renderElements(); redrawCanvasStrokes(); };
+        window.setEraserSize = function(size) { window.appState.eraserSize = size; renderView(); initBoardCanvas(); renderElements(); redrawCanvasStrokes(); };
+        window.setTextSize = function(size) { window.appState.textSize = parseInt(size); };
+        window.setTextColor = function(color) { window.appState.textColor = color; renderView(); initBoardCanvas(); renderElements(); redrawCanvasStrokes(); };
+
+        window.switchGroup = function(groupId) {
+            window.appState.currentGroupId = groupId;
+            renderView();
+            setTimeout(() => {
+                initBoardCanvas();
+                loadBoardData(window.appState.boardId, groupId, () => {
+                    renderElements();
+                    redrawCanvasStrokes();
+                });
+            }, 20);
+        };
+
+        window.toggleLockBoard = function() {
+            window.appState.isLocked = !window.appState.isLocked;
+            renderView();
+            initBoardCanvas();
+            renderElements();
+            redrawCanvasStrokes();
+        };
+
+        window.clearCurrentBoard = function() {
+            if(window.appState.role === 'student' && window.appState.isLocked) {
+                showModal('提示', '老師已鎖定白板，無法清空。');
+                return;
+            }
+            showModal('確認清空', '確定要清空目前組別的手寫筆跡與物件嗎？', () => {
+                const bId = window.appState.boardId;
+                const gId = window.appState.currentGroupId;
+                if (!window.boardDataStore[bId]) window.boardDataStore[bId] = {};
+                window.boardDataStore[bId][gId] = { elements: [], strokes: [] };
+                saveBoardData(bId, gId);
+                renderElements();
+                redrawCanvasStrokes();
+            });
+        };
+
+        function handlePointerDown(e) {
+            const state = window.appState;
+            if (state.role === 'student' && state.isLocked) {
+                showModal('提示', '老師已鎖定白板，目前無法編輯。');
+                return;
+            }
+
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (state.tool === 'pen' || state.tool === 'eraser') {
+                isDrawing = true;
+                lastX = x;
+                lastY = y;
+                const bId = state.boardId;
+                const gId = state.currentGroupId;
+                if(!window.boardDataStore[bId]) window.boardDataStore[bId] = {};
+                if(!window.boardDataStore[bId][gId]) window.boardDataStore[bId][gId] = { elements: [], strokes: [] };
+
+                currentStroke = {
+                    id: 'stroke_' + Math.random().toString(36).substring(2, 9),
+                    tool: state.tool,
+                    color: state.tool === 'eraser' ? '#f8fafc' : state.penColor,
+                    size: state.tool === 'eraser' ? state.eraserSize : state.penSize,
+                    points: [{x, y}]
+                };
+            }
+        }
+
+        function handlePointerMove(e) {
+            const rect = canvas.getBoundingClientRect();
+            currentMouseX = e.clientX - rect.left;
+            currentMouseY = e.clientY - rect.top;
+
+            redrawCanvasStrokes();
+
+            if (!isDrawing || !currentStroke) return;
+
+            currentStroke.points.push({x: currentMouseX, y: currentMouseY});
+
+            ctx.beginPath();
+            ctx.moveTo(lastX, lastY);
+            ctx.lineTo(currentMouseX, currentMouseY);
+            ctx.strokeStyle = currentStroke.color;
+            ctx.lineWidth = currentStroke.size;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.stroke();
+
+            lastX = currentMouseX;
+            lastY = currentMouseY;
+        }
+
+        function handlePointerUp() {
+            if (!isDrawing) return;
+            isDrawing = false;
+            if (currentStroke) {
+                const bId = window.appState.boardId;
+                const gId = window.appState.currentGroupId;
+                if(!window.boardDataStore[bId]) window.boardDataStore[bId] = {};
+                if(!window.boardDataStore[bId][gId]) window.boardDataStore[bId][gId] = { elements: [], strokes: [] };
+                if(!window.boardDataStore[bId][gId].strokes) window.boardDataStore[bId][gId].strokes = [];
+                window.boardDataStore[bId][gId].strokes.push(currentStroke);
+                saveBoardData(bId, gId);
+                currentStroke = null;
+            }
+            redrawCanvasStrokes();
+        }
+
+        function handlePointerLeave() {
+            currentMouseX = -100;
+            currentMouseY = -100;
+            handlePointerUp();
+        }
+
+        window.redrawCanvasStrokes = function() {
+            if (!ctx || !canvas) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            const bId = window.appState.boardId;
+            const gId = window.appState.currentGroupId;
+            const store = window.boardDataStore[bId];
+            if (!store || !store[gId]) return;
+            const data = store[gId];
+            if (data && data.strokes) {
+                data.strokes.forEach(stroke => {
+                    if(!stroke.points || stroke.points.length === 0) return;
+                    ctx.beginPath();
+                    ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
+                    for (let i = 1; i < stroke.points.length; i++) {
+                        ctx.lineTo(stroke.points[i].x, stroke.points[i].y);
+                    }
+                    ctx.strokeStyle = stroke.color;
+                    ctx.lineWidth = stroke.size;
+                    ctx.lineCap = 'round';
+                    ctx.lineJoin = 'round';
+                    ctx.stroke();
+                });
+            }
+
+            if (window.appState && window.appState.tool === 'eraser' && currentMouseX >= 0 && currentMouseY >= 0) {
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(currentMouseX, currentMouseY, (window.appState.eraserSize || 30) / 2, 0, Math.PI * 2);
+                ctx.strokeStyle = '#ef4444';
+                ctx.lineWidth = 2;
+                ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
+                ctx.fill();
+                ctx.stroke();
+                ctx.restore();
+            }
+        };
+
+        window.addNewText = function() {
+            const state = window.appState;
+            if (state.role === 'student' && state.isLocked) {
+                showModal('提示', '老師已鎖定白板，無法新增文字。');
+                return;
+            }
+            const newText = {
+                id: 'el_' + Math.random().toString(36).substring(2, 9),
+                type: 'text',
+                text: '在此輸入文字...',
+                x: window.innerWidth / 3 + Math.random() * 50,
+                y: window.innerHeight / 3 + Math.random() * 50,
+                size: state.textSize || 18,
+                color: state.textColor || '#0f172a'
+            };
+            const bId = state.boardId;
+            const gId = state.currentGroupId;
+            if(!window.boardDataStore[bId]) window.boardDataStore[bId] = {};
+            if(!window.boardDataStore[bId][gId]) window.boardDataStore[bId][gId] = { elements: [], strokes: [] };
+            window.boardDataStore[bId][gId].elements.push(newText);
+            saveBoardData(bId, gId);
+            renderElements();
+        };
+
+        window.addStickyNote = function(colorClass) {
+            const state = window.appState;
+            if (state.role === 'student' && state.isLocked) {
+                showModal('提示', '老師已鎖定白板，無法新增。');
+                return;
+            }
+            const newSticky = {
+                id: 'el_' + Math.random().toString(36).substring(2, 9),
+                type: 'sticky',
+                text: '在此寫下您的想法...',
+                color: colorClass || 'bg-yellow-200',
+                author: state.role === 'teacher' ? '老師' : (state.userName || '匿名'),
+                x: window.innerWidth / 3 + Math.random() * 50,
+                y: window.innerHeight / 3 + Math.random() * 50
+            };
+            const bId = state.boardId;
+            const gId = state.currentGroupId;
+            if(!window.boardDataStore[bId]) window.boardDataStore[bId] = {};
+            if(!window.boardDataStore[bId][gId]) window.boardDataStore[bId][gId] = { elements: [], strokes: [] };
+            window.boardDataStore[bId][gId].elements.push(newSticky);
+            saveBoardData(bId, gId);
+            renderElements();
+        };
+
+        window.addImageByUrl = function() {
+            const input = document.getElementById('image-url-input');
+            const url = input ? input.value.trim() : '';
+            if(!url) {
+                showModal('提示', '請輸入有效的圖片網址');
+                return;
+            }
+            addElementImage(url);
+            input.value = '';
+        };
+
+        window.handleImageFileUpload = function(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                addElementImage(e.target.result);
+            };
+            reader.readAsDataURL(file);
+            event.target.value = '';
+        };
+
+        function addElementImage(url) {
+            const state = window.appState;
+            if (state.role === 'student' && state.isLocked) {
+                showModal('提示', '老師已鎖定白板，無法新增圖片。');
+                return;
+            }
+            const newImg = {
+                id: 'el_' + Math.random().toString(36).substring(2, 9),
+                type: 'image',
+                url: url,
+                width: 220,
+                height: 220,
+                x: window.innerWidth / 3 + Math.random() * 50,
+                y: window.innerHeight / 3 + Math.random() * 50
+            };
+            const bId = state.boardId;
+            const gId = state.currentGroupId;
+            if(!window.boardDataStore[bId]) window.boardDataStore[bId] = {};
+            if(!window.boardDataStore[bId][gId]) window.boardDataStore[bId][gId] = { elements: [], strokes: [] };
+            window.boardDataStore[bId][gId].elements.push(newImg);
+            saveBoardData(bId, gId);
+            renderElements();
+        }
+
+        window.renderElements = function() {
+            const container = document.getElementById('board-elements-container');
+            if (!container) return;
+            container.innerHTML = '';
+
+            const viewport = document.getElementById('board-viewport');
+            const viewportWidth = viewport ? viewport.clientWidth : window.innerWidth;
+            const viewportHeight = viewport ? viewport.clientHeight : window.innerHeight;
+
+            const bId = window.appState.boardId;
+            const gId = window.appState.currentGroupId;
+            const store = window.boardDataStore[bId];
+            if (!store || !store[gId] || !store[gId].elements) return;
+
+            store[gId].elements.forEach(el => {
+                const dom = document.createElement('div');
+                dom.className = 'absolute pointer-events-auto';
+                dom.style.left = `${el.x}px`;
+                dom.style.top = `${el.y}px`;
+                dom.style.zIndex = '20';
+
+                if (el.type === 'text') {
+                    dom.innerHTML = `
+                        <div class="relative px-3 py-2 bg-white/95 backdrop-blur rounded-xl border border-slate-200/80 shadow-lg flex items-center gap-3 group text-element-box" data-id="${el.id}">
+                            <div class="w-6 h-6 bg-slate-100 hover:bg-slate-200 text-slate-500 rounded-lg flex items-center justify-center cursor-grab active:cursor-grabbing drag-handle shrink-0" title="按住圖示拖曳移動">
+                                ⠿
+                            </div>
+                            <div contenteditable="true" class="outline-none whitespace-nowrap font-medium text-slate-800 cursor-text min-w-[100px]" style="font-size: ${el.size || 18}px; color: ${el.color || '#0f172a'};" oninput="updateElementText('${el.id}', this.innerText)">${el.text}</div>
+                            <button onclick="deleteElement('${el.id}')" class="w-6 h-6 bg-slate-100 hover:bg-red-500 hover:text-white text-slate-400 rounded-lg flex items-center justify-center transition cursor-pointer text-xs shrink-0" title="刪除">
+                                ✕
+                            </button>
+                        </div>
+                    `;
+                } else if (el.type === 'sticky') {
+                    dom.innerHTML = `
+                        <div class="w-52 h-52 ${el.color || 'bg-yellow-200'} p-4 rounded-2xl shadow-xl border border-black/5 flex flex-col relative group sticky-element-box" data-id="${el.id}">
+                            <div class="flex items-center justify-between mb-2">
+                                <div class="flex items-center gap-1.5">
+                                    <div class="w-6 h-6 bg-black/10 hover:bg-black/20 text-slate-700 rounded-lg flex items-center justify-center cursor-grab active:cursor-grabbing drag-handle shrink-0" title="按住圖示拖曳移動">
+                                        ⠿
+                                    </div>
+                                    <span class="text-xs font-bold text-slate-700 opacity-70">👤 ${el.author || '匿名'}</span>
+                                </div>
+                                <button onclick="deleteElement('${el.id}')" class="w-6 h-6 bg-black/10 hover:bg-red-600 hover:text-white text-slate-700 rounded-lg flex items-center justify-center transition cursor-pointer text-xs shrink-0" title="刪除">
+                                    🗑️
+                                </button>
+                            </div>
+                            <div contenteditable="true" class="flex-1 outline-none text-slate-800 text-sm resize-none overflow-y-auto leading-relaxed cursor-text" oninput="updateElementText('${el.id}', this.innerText)">${el.text}</div>
+                        </div>
+                    `;
+                } else if (el.type === 'image') {
+                    const currentWidth = el.width || 220;
+                    const currentHeight = el.height || 220;
+                    dom.innerHTML = `
+                        <div class="relative group bg-white p-2 rounded-2xl shadow-xl border border-slate-200 image-element-box flex flex-col" data-id="${el.id}" style="width: ${currentWidth}px; height: ${currentHeight}px;">
+                            <div class="flex items-center justify-between mb-1 px-1 shrink-0">
+                                <div class="w-6 h-6 bg-slate-100 hover:bg-slate-200 text-slate-500 rounded-lg flex items-center justify-center cursor-grab active:cursor-grabbing drag-handle shrink-0" title="按住圖示拖曳移動">
+                                    ⠿
+                                </div>
+                                <span class="text-[10px] text-slate-400 font-medium">右下角任意縮放</span>
+                                <button onclick="deleteElement('${el.id}')" class="w-5 h-5 bg-red-100 hover:bg-red-500 hover:text-white text-red-500 rounded flex items-center justify-center transition cursor-pointer text-xs" title="刪除">
+                                    ✕
+                                </button>
+                            </div>
+                            <div class="relative overflow-hidden rounded-xl flex-1 flex items-center justify-center bg-slate-50 w-full h-full">
+                                <img src="${el.url}" class="w-full h-full object-cover pointer-events-none block" onerror="this.src='https://placehold.co/200x200/e2e8f0/64748b?text=Image+Load+Error'" />
+                                <div class="absolute bottom-1 right-1 w-5 h-5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md flex items-center justify-center cursor-se-resize shadow-md resize-handle z-30" title="按住滑鼠拖曳調整圖片大小">
+                                    ⤢
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+
+                // Dragging Logic with Viewport Boundary Constraints
+                const handle = dom.querySelector('.drag-handle');
+                let isDragging = false;
+                let startX, startY;
+
+                if (handle) {
+                    handle.addEventListener('pointerdown', (e) => {
+                        if (window.appState.role === 'student' && window.appState.isLocked) return;
+                        isDragging = true;
+                        startX = e.clientX - el.x;
+                        startY = e.clientY - el.y;
+                        try { handle.setPointerCapture(e.pointerId); } catch (err) {}
+                        e.stopPropagation();
+                    });
+
+                    handle.addEventListener('pointermove', (e) => {
+                        if (!isDragging) return;
+                        const elemWidth = dom.offsetWidth;
+                        const elemHeight = dom.offsetHeight;
+
+                        const rawX = e.clientX - startX;
+                        const rawY = e.clientY - startY;
+
+                        el.x = Math.max(0, Math.min(viewportWidth - elemWidth, rawX));
+                        el.y = Math.max(0, Math.min(viewportHeight - elemHeight, rawY));
+
+                        dom.style.left = `${el.x}px`;
+                        dom.style.top = `${el.y}px`;
+                    });
+
+                    handle.addEventListener('pointerup', (e) => {
+                        if (isDragging) {
+                            isDragging = false;
+                            try { handle.releasePointerCapture(e.pointerId); } catch (err) {}
+                            saveBoardData(window.appState.boardId, window.appState.currentGroupId);
+                        }
+                    });
+                }
+
+                // Image Free Resizing Logic
+                if (el.type === 'image') {
+                    const resizeHandle = dom.querySelector('.resize-handle');
+                    let isResizing = false;
+                    let startResizeX = 0;
+                    let startResizeY = 0;
+                    let startWidth = 220;
+                    let startHeight = 220;
+
+                    if (resizeHandle) {
+                        resizeHandle.addEventListener('pointerdown', (e) => {
+                            if (window.appState.role === 'student' && window.appState.isLocked) return;
+                            isResizing = true;
+                            startResizeX = e.clientX;
+                            startResizeY = e.clientY;
+                            startWidth = el.width || 220;
+                            startHeight = el.height || 220;
+                            try { resizeHandle.setPointerCapture(e.pointerId); } catch (err) {}
+                            e.stopPropagation();
+                        });
+
+                        resizeHandle.addEventListener('pointermove', (e) => {
+                            if (!isResizing) return;
+                            const dx = e.clientX - startResizeX;
+                            const dy = e.clientY - startResizeY;
+                            
+                            const maxAllowedWidth = Math.max(120, viewportWidth - el.x);
+                            const maxAllowedHeight = Math.max(120, viewportHeight - el.y);
+
+                            const newWidth = Math.max(120, Math.min(maxAllowedWidth, startWidth + dx));
+                            const newHeight = Math.max(120, Math.min(maxAllowedHeight, startHeight + dy));
+
+                            el.width = newWidth;
+                            el.height = newHeight;
+
+                            const imageBox = dom.querySelector('.image-element-box');
+                            if (imageBox) {
+                                imageBox.style.width = `${newWidth}px`;
+                                imageBox.style.height = `${newHeight}px`;
+                            }
+                        });
+
+                        resizeHandle.addEventListener('pointerup', (e) => {
+                            if (isResizing) {
+                                isResizing = false;
+                                try { resizeHandle.releasePointerCapture(e.pointerId); } catch (err) {}
+                                saveBoardData(window.appState.boardId, window.appState.currentGroupId);
+                            }
+                        });
+                    }
+                }
+
+                container.appendChild(dom);
+            });
+        };
+
+        window.deleteElement = function(id) {
+            if (window.appState.role === 'student' && window.appState.isLocked) {
+                showModal('提示', '老師已鎖定白板，無法刪除元素。');
+                return;
+            }
+            const bId = window.appState.boardId;
+            const gId = window.appState.currentGroupId;
+            const store = window.boardDataStore[bId];
+            if (!store || !store[gId]) return;
+            store[gId].elements = store[gId].elements.filter(el => el.id !== id);
+            saveBoardData(bId, gId);
+            renderElements();
+        };
+
+        window.updateElementText = function(id, newText) {
+            const bId = window.appState.boardId;
+            const gId = window.appState.currentGroupId;
+            const store = window.boardDataStore[bId];
+            if (!store || !store[gId]) return;
+            const el = store[gId].elements.find(item => item.id === id);
+            if (el) {
+                el.text = newText;
+                saveBoardData(bId, gId);
+            }
+        };
+
+        renderView();
+    </script>
+</body>
+</html>
